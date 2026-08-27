@@ -1,0 +1,48 @@
+---
+title: "Logistic Regression Storm Classifier"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = T, fig.width=8, fig.height=4)
+options(scipen = 0, digits = 3)  # controls base R output
+if(!require('pacman')) {
+  install.packages('pacman')
+}
+pacman::p_load(ggplot2, dplyr, tidyverse, gridExtra, ggrepel, plotly, skimr, tidytext, stringr, caret, here)
+# install a package if it does not exist already and put the package in the path (library)
+# dplyr, ggplot2,tidyr
+
+```
+
+```{r}
+# Setup
+set.seed(123)
+
+# Load and prepare data
+data_prediction <- read.csv(here("data", "processed", "weather_wide_pivot.csv"))
+
+data_prediction1 <- data_prediction %>%
+  select(-CurrentDate) %>%
+  mutate(Location = as.factor(Location))
+
+# Create train/test split (assuming 'Label' is your outcome variable)
+train_index <- createDataPartition(data_prediction1$Label, p = 0.8, list = FALSE)
+
+data_train <- data_prediction1[train_index, ]
+data_test  <- data_prediction1[-train_index, ]
+
+# Fit logistic regression model
+model <- glm(Label ~ ., data = data_train, family = binomial)
+
+# View model summary
+summary(model)
+
+# Predict on test set
+predicted_probs <- predict(model, newdata = data_test, type = "response")
+predicted_classes <- ifelse(predicted_probs > 0.0098, 1, 0)
+
+# Confusion matrix
+confusionMatrix(as.factor(predicted_classes), as.factor(data_test$Label))
+
+```

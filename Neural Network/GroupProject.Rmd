@@ -1,0 +1,203 @@
+---
+title: "Precipitation Modeling with Linear and Neural Networks"
+output: html_document
+date: "2025-07-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.height = 4, fig.width = 6, warning = FALSE)
+if (!require("pacman")) install.packages("pacman")
+
+pacman::p_load(ggplot2, glmnet, dplyr, keras, tidyverse, tensorflow, reticulate, data.table, lubridate, plotROC, usmap, here)
+# 
+# reticulate::conda_create(envname = "r-test")
+# 
+# Configure a Python environment appropriate for your computer before running
+# the neural-network sections. For example:
+# reticulate::use_condaenv("r-test", required = FALSE)
+
+# conda_install("tensorflow", envname = "r-test")
+```
+
+```{r}
+rain_data <- read.csv(here("data", "processed", "rain_data.csv"))
+```
+
+```{r}
+n <- nrow(rain_data)
+set.seed(123)
+train.index <- sample(n, floor(0.6*n))
+
+rain_data_tv <- rain_data[-train.index, ]
+
+test.index <- sample(nrow(rain_data_tv), floor(0.2*n))
+
+rain_data_train <- rain_data[train.index, ]
+rain_data_test <- rain_data_tv[test.index, ]
+rain_data_val <- rain_data_tv[-test.index, ]
+#preciptation is col 8
+```
+
+```{r}
+rain_data_train.X <- select(rain_data_train, -8)
+rain_data_train.y <- pull(rain_data_train, 8)
+
+rain_data_test.X <- select(rain_data_test, -8)
+rain_data_test.y <- pull(rain_data_test, 8)
+
+rain_data_val.X <- select(rain_data_val, -8)
+rain_data_val.y <- pull(rain_data_val, 8)
+
+str(rain_data)
+```
+
+
+
+
+```{r}
+##Model (Linear Model)
+fit_data_train <- rain_data_train %>%
+  ungroup() %>% 
+  select(-HourlyVisibility, -HourlyStationPressure) %>%
+  mutate(
+    Location = as.factor(Location),
+    Year = as.factor(Year),
+    Month = as.factor(Month),
+    Day = as.factor(Day),
+    Hour = as.factor(Hour)
+  )
+
+fit_data_val <- rain_data_val %>%
+  ungroup() %>% 
+  select(-HourlyVisibility, -HourlyStationPressure) %>%
+  mutate(
+    Location = as.factor(Location),
+    Year = as.factor(Year),
+    Month = as.factor(Month),
+    Day = as.factor(Day),
+    Hour = as.factor(Hour)
+  )
+fit_data_test <- rain_data_test %>%
+  ungroup() %>% 
+  select(-HourlyVisibility, -HourlyStationPressure) %>%
+  mutate(
+    Location = as.factor(Location),
+    Year = as.factor(Year),
+    Month = as.factor(Month),
+    Day = as.factor(Day),
+    Hour = as.factor(Hour)
+  )
+
+fit_linear <- lm(HourlyPrecipitation ~., fit_data_train)
+
+# 2. Optional: Validate
+val_preds <- predict(fit_linear, newdata = fit_data_val)
+mae_val_linear <- mean(abs(val_preds - fit_data_val$HourlyPrecipitation))
+
+# 3. Final test performance
+test_preds <- predict(fit_linear, newdata = fit_data_test)
+mae_test_linear <- mean(abs(test_preds - fit_data_test$HourlyPrecipitation))
+
+
+
+
+mse_val_linear <- mean((val_preds - rain_data_val$HourlyPrecipitation)^2)
+
+# MSE for test
+mse_test_linear <- mean((test_preds - rain_data_test$HourlyPrecipitation)^2)
+
+mae_val_linear
+mse_val_linear
+mae_test_linear
+mse_test_linear
+```
+
+``` {r}
+rain_data_train.X <- select(rain_data_train.X, -Location)
+rain_data_val.X <- select(rain_data_val.X, -Location)
+rain_data_test.X <- select(rain_data_test.X, -Location)
+
+rain_data_test.X
+```
+
+```{r}
+p <- dim(rain_data_train.X)[2]
+
+model <- keras_model_sequential() %>%
+  layer_dense(units = 64, activation = "relu", input_shape = c(p)) %>%
+  layer_dropout(0.2) %>% 
+  layer_dense(units = 32, activation = "relu") %>%
+  layer_dense(units = 1)
+
+
+zero_count <- sum(rain_data_train.y == 0)
+total_count <- length(rain_data_train.y)
+zero_ratio <- zero_count / total_count
+
+cat("Proportion of zero precipitation values:", round(zero_ratio * 100, 2), "%\n")
+```
+
+```{r}
+model %>% compile(
+  optimizer = "rmsprop",
+  loss = "mse",
+  metrics = c("mae")
+)
+
+```
+
+```{r}
+py_config()
+
+model %>% fit(
+  as.matrix(rain_data_train.X), 
+  rain_data_train.y, 
+  epochs = 16, 
+  batch_size = 256, 
+  validation_data=list(as.matrix(rain_data_val.X), rain_data_val.y)
+)
+```
+
+
+
+```{r}
+model %>% evaluate(as.matrix(rain_data_test.X), rain_data_test.y)
+```
+
+
+```{r}
+# austin2 <- austin %>% rename(prec_per_day = PrecipitationSumInches)
+# austin2$prec_per_day[austin2$prec_per_day == "T"] <- 0
+# 
+# austin2_clean <- select(austin2, -Date)
+# austin2_clean <- austin2_clean[!apply(austin2_clean == "-", 1, any), ]
+# austin2_clean <- austin2_clean %>%
+#   mutate(across(-Events, ~ as.numeric(as.character(.))))
+# str(austin2_clean)
+```
+
+```{r}
+# fit1<- lm(prec_per_day ~., austin2_clean)
+# summary(fit1)
+```
+
+```{r}
+# x <- model.matrix (prec_per_day ~ ., data = austin2_clean)[, -1]  
+# y <- austin2_clean$prec_per_day
+```
+
+```{r}
+# set.seed(123)
+# 
+# fit.cv <- cv.glmnet(x, y)
+# 
+# coef.1se <- extract.coef(fit.cv, lambda = fit.cv$lambda.1se)
+# coef.1se
+# var.1se <- rownames(coef.1se)[-1]
+# var.1se
+# 
+# plot(lasso)
+# ```
+# ```{r}
+# lm(prec_per_day~var.1se, austin2_clean)
+```
