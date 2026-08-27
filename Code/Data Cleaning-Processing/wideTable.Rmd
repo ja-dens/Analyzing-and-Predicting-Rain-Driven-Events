@@ -1,0 +1,162 @@
+---
+title: "Ten-Day Weather Feature Engineering"
+output: html_document
+date: "2025-07-30"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = T, fig.width=8, fig.height=4)
+options(scipen = 0, digits = 3)  # controls base R output
+if(!require('pacman')) {
+  install.packages('pacman')
+}
+pacman::p_load(ggplot2, dplyr, tidyverse, gridExtra, ggrepel, plotly, skimr, tidytext, stringr, here)
+# install a package if it does not exist already and put the package in the path (library)
+# dplyr, ggplot2,tidyr
+library(plotly)
+dir.create(here("data", "processed"), recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r}
+data_weather <- read.csv(here("data", "processed", "rain_data.csv"), header = TRUE, na.strings = c(""))
+data_disaster <- read.csv(here("data", "raw", "emdat_data.csv"), header = TRUE)
+disaster_states <- read.csv(here("data", "processed", "states_extracted.csv"), header = TRUE) %>%
+  select(States)
+```
+
+```{r}
+data_disaster_binded <-  bind_cols(data_disaster, disaster_states)
+data_disaster_binded <- data_disaster_binded %>% drop_na(Start.Year, Start.Month, Start.Day)
+data_weather <- data_weather %>%
+  mutate(Date = as.Date(paste(Year, Month, Day, sep = "-")))
+```
+```{r}
+data_disaster_rain <- data_disaster_binded %>%
+  filter(Disaster.Type %in% c("Storm"))
+
+start_dates <- data_disaster_rain %>%
+  select(Start.Year,Start.Month,Start.Day,Disaster.Type,States) %>%
+  mutate(
+    Start.Year = as.character(Start.Year),
+    Start.Month = str_pad(as.character(Start.Month), 2, pad = "0"),
+    Start.Day = str_pad(as.character(Start.Day), 2, pad = "0"),
+    Start.Date = as.Date(paste(Start.Year, Start.Month, Start.Day, sep = "-"))
+    )
+```
+
+```{r}
+
+# Remove first 10 days
+min_date <- min(data_weather$Date, na.rm = TRUE)
+data_weather_filtered <- data_weather %>%
+  filter(Date > min_date + 11)
+
+# Get unique dates (if you want to do this for each unique date)
+unique_dates <- sort(unique(data_weather_filtered$Date))
+
+# Create a data frame with 10-day vectors for each date
+date_lookback_df <- data.frame(
+  CurrentDate = unique_dates,
+  Last10Days = I(lapply(unique_dates, function(x) seq(x - 10, x - 1, by = "day")))
+)
+```
+
+```{r}
+
+# Assume date_lookback_df has a Location column
+# Create a reference set of disaster dates per location
+disaster_events <- start_dates %>%
+  select(Start.Date, States, Disaster.Type) %>%
+  distinct()
+
+write.csv(disaster_events, file = here("data", "processed", "disaster_events.csv"), row.names = FALSE)
+
+# Split the comma-separated states into individual rows
+disaster_events_long <- disaster_events %>%
+  separate_rows(States, sep = ",\\s*") %>%  # removes spaces around commas
+  rename(State = States)
+  
+```
+
+```{r}
+
+data_weather_daily <- data_weather %>%
+  group_by(Location,Date) %>%
+  summarize(
+    DailyPrecipitation = sum(HourlyPrecipitation),
+    AverageAltimeterSetting = mean(HourlyAltimeterSetting),
+    AverageStationPressure = mean(HourlyStationPressure),
+    TotalPressureChange = sum(HourlyPressureChange),
+    AverageWetBulbTemp = mean(HourlyWetBulbTemperature),
+    AverageDryBulbTemp = mean(HourlyDryBulbTemperature),
+    AverageDewPointTemp = mean(HourlyDewPointTemperature),
+    AverageRelativeHumidity = mean(HourlyRelativeHumidity),
+    AverageWindSpeed = mean(HourlyWindSpeed)
+            )
+```
+
+```{r}
+# Join disaster state info to weather data (if not already state-specific)
+# Assuming 'Location' in data_weather_daily refers to State
+weather_chunks <- list()
+
+for (i in seq_len(nrow(date_lookback_df))) {
+  current_date <- date_lookback_df$CurrentDate[i]
+  past_10_days <- date_lookback_df$Last10Days[[i]]
+  
+  # Filter weather data to the 10 days
+  chunk <- data_weather_daily %>%
+    filter(Date %in% past_10_days) %>%
+    mutate(CurrentDate = current_date)
+  
+  weather_chunks[[i]] <- chunk
+}
+
+# Combine all chunks into one dataframe
+weather_10day <- bind_rows(weather_chunks)
+
+
+```
+
+
+```{r}
+
+# Prepare for labeling
+disaster_events_long <- disaster_events_long %>%
+  select(Start.Date, State) %>%
+  distinct() %>%
+  mutate(Label = 1)
+
+
+# Add label to weather_10day
+weather_labeled <- weather_10day %>%
+  left_join(disaster_events_long, by = c("CurrentDate" = "Start.Date", "Location" = "State")) %>%
+  mutate(Label = ifelse(is.na(Label), 0, Label))
+```
+```{r}
+
+weather_wide <- weather_labeled %>%
+  arrange(Location, CurrentDate, Date) %>%
+  group_by(Location, CurrentDate, Label) %>%
+  mutate(day_lag = row_number()) %>%  # assigns 1 to 10
+  ungroup()
+
+# Now pivot to wide format: variables x day
+weather_wide_pivot <- weather_wide %>%
+  select(Location, CurrentDate, Label, day_lag,
+         DailyPrecipitation, AverageAltimeterSetting, AverageStationPressure,
+         TotalPressureChange, AverageWetBulbTemp, AverageDryBulbTemp,
+         AverageDewPointTemp, AverageRelativeHumidity, AverageWindSpeed) %>%
+  pivot_wider(
+    names_from = day_lag,
+    values_from = c(DailyPrecipitation, AverageAltimeterSetting, AverageStationPressure,
+                    TotalPressureChange, AverageWetBulbTemp, AverageDryBulbTemp,
+                    AverageDewPointTemp, AverageRelativeHumidity, AverageWindSpeed),
+    names_sep = "_day"
+  )
+
+skim(weather_wide_pivot)
+
+write.csv(weather_wide_pivot, here("data", "processed", "weather_wide_pivot.csv"), row.names = FALSE)
+
+```

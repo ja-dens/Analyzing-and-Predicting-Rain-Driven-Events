@@ -1,0 +1,199 @@
+---
+title: "XGBoost Storm Classifiers"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = T, fig.width=8, fig.height=4)
+options(scipen = 0, digits = 3)  # controls base R output
+if(!require('pacman')) {
+  install.packages('pacman')
+}
+pacman::p_load(ggplot2, dplyr, tidyverse, gridExtra, ggrepel, plotly, skimr, tidytext, stringr, caret, xgboost, fastDummies, here)
+# install a package if it does not exist already and put the package in the path (library)
+# dplyr, ggplot2,tidyr
+dir.create(here("models"), recursive = TRUE, showWarnings = FALSE)
+
+```
+
+```{r}
+#loading dataset
+data_prediction <- read.csv(here("data", "processed", "weather_wide_pivot.csv"))
+
+# 2. Remove non-numeric columns and define features and label
+data_model <- data_prediction %>%
+  select(-CurrentDate) %>%
+  dummy_cols(remove_selected_columns = TRUE)# drop non-feature columns
+
+X <- data_model %>% select(-Label) %>% as.matrix()
+y <- data_model$Label
+
+```
+
+```{r}
+set.seed(123)
+
+# Split into 80% train, 20% test
+train_index <- createDataPartition(y, p = 0.8, list = FALSE)
+X_train <- X[train_index, ]
+y_train <- y[train_index]
+
+X_test <- X[-train_index, ]
+y_test <- y[-train_index]
+
+```
+
+
+1st XGBoost Model with Cross-Validation to determine best number of rounds
+```{r}
+# DMatrix for all data
+dtrain <- xgb.DMatrix(data = X_train, label = y_train)
+
+set.seed(123)
+cv_model <- xgb.cv(
+  data = dtrain,
+  nrounds = 150,
+  nfold = 5,
+  early_stopping_rounds = 10,
+  maximize = TRUE,
+  objective = "binary:logistic",
+  eval_metric = "auc",
+  verbose = 1
+)
+
+```
+
+```{r}
+
+# Extract performance metrics
+cv_log <- cv_model$evaluation_log
+
+# Plot
+ggplot(cv_log, aes(x = iter)) +
+  geom_line(aes(y = train_auc_mean, color = "Train AUC")) +
+  geom_line(aes(y = test_auc_mean, color = "Validation AUC")) +
+  labs(title = "AUC per Boosting Round",
+       x = "Boosting Round (nrounds)",
+       y = "AUC") +
+  theme_minimal() +
+  scale_color_manual(values = c("Train AUC" = "blue", "Validation AUC" = "red"))
+
+```
+
+
+```{r}
+best_nrounds <- cv_model$best_iteration
+
+final_model <- xgboost(
+  data = dtrain,
+  nrounds = best_nrounds,
+  objective = "binary:logistic",
+  eval_metric = "auc",
+  verbose = 0
+)
+```
+
+```{r}
+# #Saving/loading models
+# 
+# Save cross-validation model (R object)
+saveRDS(cv_model, here("models", "cv_model.rds"))
+
+# # Load it later
+# #cv_model <- readRDS(here("models", "cv_model.rds"))
+# 
+# # Save final trained model to file
+xgb.save(final_model, here("models", "final_model.xgb"))
+# # Load the saved model
+# #final_model <- xgb.load(here("models", "final_model.xgb"))
+
+
+# saveRDS(list(X_train = X_train, y_train = y_train, X_test = X_test, y_test = y_test), 
+#         here("models", "data_splits.rds"))
+# 
+# # Load later
+# data_splits <- readRDS(here("models", "data_splits.rds"))
+# X_train <- data_splits$X_train
+# y_train <- data_splits$y_train
+
+```
+
+```{r}
+
+dtest <- xgb.DMatrix(data = X_test)
+
+# Predict probabilities
+y_pred_prob <- predict(final_model, dtest)
+
+# Convert to 0/1 labels (using threshold 0.5)
+y_pred <- ifelse(y_pred_prob > 0.5, 1, 0)
+
+# Accuracy
+accuracy <- mean(y_pred == y_test)
+print(paste("Test Accuracy:", round(accuracy, 4)))
+
+```
+
+```{r}
+confusionMatrix(factor(y_pred), factor(y_test))
+```
+
+2nd XGBoost Model
+```{r}
+
+# 1. Create DMatrix
+dtrain <- xgb.DMatrix(data = X_train, label = y_train)
+dtest <- xgb.DMatrix(data = X_test, label = y_test)
+
+# 2. Calculate scale_pos_weight to handle imbalance (optional but recommended)
+# ratio = (# of negatives) / (# of positives)
+neg <- sum(y_train == 0)
+pos <- sum(y_train == 1)
+scale_weight <- neg / pos
+
+# 3. Set parameters to favor recall
+params_recall <- list(
+  booster = "gbtree",
+  objective = "binary:logistic",
+  eval_metric = "auc",  # You could also use 'logloss'
+  scale_pos_weight = scale_weight,  # Helps model pay more attention to minority class
+  max_depth = 11,
+  eta = 0.075,
+  gamma = 1,
+  subsample = 0.7,
+  colsample_bytree = 0.8,
+  lambda = 1
+)
+
+# 4. Train the model
+set.seed(123)
+final_model_recall <- xgb.train(
+  params = params_recall,
+  data = dtrain,
+  nrounds = 100,
+  watchlist = list(train = dtrain, test = dtest),
+  early_stopping_rounds = 10,
+  print_every_n = 10
+)
+
+# 5. Predict with LOWER threshold to favor recall
+pred_probs <- predict(final_model_recall, X_test)
+threshold <- 0.4  # lower threshold to boost recall
+pred_labels <- ifelse(pred_probs > threshold, 1, 0)
+
+# 6. Evaluate
+confusionMatrix(factor(pred_labels), factor(y_test), positive = "1")
+```
+
+```{r}
+# 
+# # Save final trained model to file
+xgb.save(final_model_recall, here("models", "final_model_recall.xgb"))
+# # Load the saved model
+# final_model_recall <- xgb.load(here("models", "final_model_recall.xgb"))
+
+# # Load later
+# data_splits <- readRDS(here("models", "data_splits.rds"))
+# X_train <- data_splits$X_train
+# y_train <- data_splits$y_train
+```
